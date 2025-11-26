@@ -2,8 +2,6 @@ require('dotenv').config();
 const express = require('express');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const winston = require('winston');
-const arcjet = require('@arcjet/node');
 const jwt = require('jsonwebtoken');
 const jwksClient = require('jwks-rsa');
 
@@ -15,32 +13,13 @@ app.use(express.json({ limit: '1mb' }));
 
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per window
+  windowMs: 15 * 60 * 1000,
+  max: 100,
   message: 'Too many requests, please try again later'
 });
 app.use('/tools/', limiter);
 
-// Audit logging with Winston
-const logger = winston.createLogger({
-  level: 'info',
-  format: winston.format.json(),
-  transports: [
-    new winston.transports.File({ filename: 'error.log', level: 'error' }),
-    new winston.transports.File({ filename: 'audit.log' })
-  ]
-});
-
-// Arcjet security rules
-const aj = arcjet({
-  key: process.env.ARCJET_KEY,
-  rules: [
-    arcjet.detectBot({ mode: "LIVE" }),
-    arcjet.shield({ mode: "LIVE" })
-  ]
-});
-
-// JWT verification (from Week 7)
+// JWT verification
 const client = jwksClient({
   jwksUri: 'https://www.googleapis.com/oauth2/v3/certs'
 });
@@ -55,7 +34,6 @@ function authenticateToken(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    logger.warn('Unauthorized access attempt', { ip: req.ip, path: req.path });
     return res.status(401).json({ error: 'Token required' });
   }
   
@@ -64,34 +42,31 @@ function authenticateToken(req, res, next) {
     issuer: 'https://accounts.google.com'
   }, (err, decoded) => {
     if (err) {
-      logger.error('Token verification failed', { error: err.message, ip: req.ip });
-      return res.status(403).json({ error: 'Invalid token' });
+      return res.status(403).json({ error: 'Invalid token', message: err.message });
     }
-    
     req.user = decoded;
-    logger.info('Authenticated request', { 
-      user: decoded.email, 
-      action: req.path,
-      timestamp: new Date().toISOString()
-    });
     next();
   });
 }
 
-// Public endpoint (no auth)
+// Public endpoints
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'healthy',
+    service: 'mcp-say-hello',
+    timestamp: new Date().toISOString()
+  });
+});
+
 app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString() 
+  });
 });
 
 // Protected endpoint
-app.post('/tools/call', authenticateToken, async (req, res) => {
-  // Arcjet security check
-  const decision = await aj.protect(req);
-  if (decision.isDenied()) {
-    logger.warn('Arcjet blocked request', { reason: decision.reason, ip: req.ip });
-    return res.status(403).json({ error: 'Request blocked by security policy' });
-  }
-
+app.post('/tools/call', authenticateToken, (req, res) => {
   const { name, arguments: args } = req.body;
   
   if (name !== 'sayHello') {
@@ -104,37 +79,21 @@ app.post('/tools/call', authenticateToken, async (req, res) => {
     casual: `Hey ${req.user.name}! 👋`
   };
   
-  const greeting = greetings[args?.greeting_type || 'casual'];
-  
-  logger.info('Tool executed', {
-    user: req.user.email,
-    tool: name,
-    args: args,
-    timestamp: new Date().toISOString()
-  });
-  
   res.json({
-    content: [{ type: 'text', text: greeting }]
+    content: [{ 
+      type: 'text', 
+      text: greetings[args?.greeting_type || 'casual'] 
+    }]
   });
 });
 
-// Token revocation endpoint
-const revokedTokens = new Set();
+// Export for Vercel
+module.exports = app;
 
-app.post('/auth/revoke', authenticateToken, (req, res) => {
-  const token = req.headers.authorization.split(' ')[1];
-  revokedTokens.add(token);
-  
-  logger.warn('Token revoked', { 
-    user: req.user.email, 
-    reason: req.body.reason || 'user_request',
-    timestamp: new Date().toISOString()
+// Local server only
+if (require.main === module) {
+  const PORT = process.env.PORT || 3001;
+  app.listen(PORT, () => {
+    console.log(`✅ Server running on :${PORT}`);
   });
-  
-  res.json({ message: 'Token revoked successfully' });
-});
-
-app.listen(3001, () => {
-  logger.info('Server started', { port: 3001 });
-  console.log('✅ Production server running on :3001');
-});
+}
